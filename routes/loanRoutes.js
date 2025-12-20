@@ -53,23 +53,29 @@ router.get("/", async (req, res) => {
          loans.id,
          loans.asset_id,
          loans.borrower,
+         loans.borrower_user_id,
+         loans.usage_location_id,
          loans.borrowed_at,
          loans.due_date,
          loans.returned_at,
          loans.status,
          loans.notes,
 
-         -- NEW FIELDS
          loans.before_photo_url,
          loans.after_photo_url,
          loans.condition_before,
          loans.condition_after,
 
-         -- asset info
          assets.name AS asset_name,
-         assets.code AS asset_code
+         assets.code AS asset_code,
+
+         u.name  AS borrower_user_name,
+         u.email AS borrower_user_email,
+         loc.name AS usage_location_name
        FROM loans
        JOIN assets ON assets.id = loans.asset_id
+       LEFT JOIN users u ON u.id = loans.borrower_user_id
+       LEFT JOIN locations loc ON loc.id = loans.usage_location_id
        ${where}
        ORDER BY loans.borrowed_at DESC
        LIMIT 200`,
@@ -82,6 +88,7 @@ router.get("/", async (req, res) => {
     res.status(500).json({ message: "Gagal mengambil riwayat peminjaman" });
   }
 });
+
 
 /* ============================================================
    UPLOAD FOTO BEFORE PINJAM

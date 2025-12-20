@@ -5,43 +5,35 @@ import { upload } from "../upload.js";
 
 const router = express.Router();
 
-// GET /api/assets?entity_id=...
+// GET /api/assets?entity_id=...&include_deleted=true
 router.get("/", async (req, res) => {
-  const { entity_id } = req.query;
+  const { entity_id, include_deleted } = req.query;
 
   try {
     let query = `
-      SELECT
-        a.id,
-        a.name,
-        a.code,
-        a.location,
-        a.condition,
-        a.status,
-        a.funding_source_id,
-        a.value,
-        a.location_id,
-        a.category_id,
-        a.budget_code_id,
-        a.notes,
-        a.purchase_date,
-        a.sequence_no,
-        a.photo_url,
-        a.receipt_url,
-        a.created_at
+      SELECT a.id, a.name, a.code, a.location, a.condition, a.status,
+             a.funding_source_id, a.value, a.location_id, a.category_id,
+             a.budget_code_id, a.notes, a.purchase_date, a.sequence_no,
+             a.photo_url, a.receipt_url, a.created_at, a.deleted_at
       FROM assets a
     `;
-    const params = [];
 
-    if (entity_id) {
-      params.push(entity_id);
-      query += `
-        JOIN funding_sources fs ON fs.id = a.funding_source_id
-        WHERE fs.entity_id = $1
-      `;
+    const params = [];
+    const where = [];
+
+    // default: hanya yg aktif
+    if (include_deleted !== "true") {
+      where.push(`a.deleted_at IS NULL`);
     }
 
-    query += " ORDER BY a.created_at DESC";
+    if (entity_id) {
+      query += ` JOIN funding_sources fs ON fs.id = a.funding_source_id `;
+      params.push(entity_id);
+      where.push(`fs.entity_id = $${params.length}`);
+    }
+
+    if (where.length) query += ` WHERE ${where.join(" AND ")} `;
+    query += ` ORDER BY a.created_at DESC`;
 
     const result = await pool.query(query, params);
     res.json(result.rows);
@@ -50,6 +42,8 @@ router.get("/", async (req, res) => {
     res.status(500).json({ message: "Failed to fetch assets" });
   }
 });
+
+
 
 // POST /api/assets
 router.post("/", async (req, res) => {
@@ -168,54 +162,92 @@ router.post("/", async (req, res) => {
 });
 
 // POST /api/assets/:id/borrow
-// PINJAM aset
 router.post("/:id/borrow", async (req, res) => {
   const assetId = req.params.id;
-  const { borrower, due_date, notes } = req.body;   // ← tambah notes
 
-  if (!borrower) {
-    return res.status(400).json({ message: "Nama peminjam wajib diisi" });
+  const {
+    borrower, // optional (legacy)
+    borrower_user_id,
+    usage_location_id,
+    due_date,
+    notes,
+    condition_now, // ✅ NEW
+  } = req.body;
+
+  // minimal: harus ada borrower_user_id (karena sekarang pilih dari list)
+  if (!borrower_user_id) {
+    return res.status(400).json({ message: "borrower_user_id wajib diisi" });
+  }
+
+  if (!usage_location_id) {
+    return res.status(400).json({ message: "usage_location_id wajib diisi" });
   }
 
   try {
     // cek aset dulu
-    const assetResult = await pool.query(
-      "SELECT * FROM assets WHERE id = $1",
-      [assetId]
-    );
+    const assetResult = await pool.query("SELECT * FROM assets WHERE id = $1", [
+      assetId,
+    ]);
     if (assetResult.rowCount === 0) {
       return res.status(404).json({ message: "Aset tidak ditemukan" });
     }
     const asset = assetResult.rows[0];
 
     if (asset.status === "borrowed") {
-      return res
-        .status(400)
-        .json({ message: "Aset ini sedang dipinjam" });
+      return res.status(400).json({ message: "Aset ini sedang dipinjam" });
     }
 
-    // insert ke loans (sekarang dengan notes)
-    const loanRes = await pool.query(
-      `INSERT INTO loans (asset_id, borrower, due_date, notes)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, asset_id, borrower, borrowed_at, due_date, returned_at, status, notes, before_photo_url`,
-      [assetId, borrower, due_date || null, notes || null]
+    // ambil user peminjam utk isi field borrower (string) agar kompatibel
+    const userRes = await pool.query(
+      `SELECT id, name, email FROM users WHERE id = $1 AND deleted_at IS NULL`,
+      [borrower_user_id]
     );
+    if (userRes.rowCount === 0) {
+      return res.status(400).json({ message: "User peminjam tidak valid" });
+    }
+    const borrowerName = borrower || userRes.rows[0].name;
+
+    // insert ke loans (isi field baru)
+    const loanRes = await pool.query(
+      `INSERT INTO loans (
+         asset_id,
+         borrower,
+         borrower_user_id,
+         usage_location_id,
+         due_date,
+         notes,
+         condition_before
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING
+         id, asset_id, borrower, borrower_user_id, usage_location_id,
+         borrowed_at, due_date, returned_at, status, notes,
+         before_photo_url, after_photo_url, condition_before, condition_after`,
+      [
+        assetId,
+        borrowerName,
+        borrower_user_id,
+        usage_location_id,
+        due_date || null,
+        notes || null,
+        condition_now || null, // ✅ masuk ke condition_before
+      ]
+    );
+
     const loan = loanRes.rows[0];
 
-    // update status aset
+    // update status aset + (opsional) update lokasi penggunaan ke location_id / location (kalau memang mau)
     const updatedAssetResult = await pool.query(
       `UPDATE assets
        SET status = 'borrowed'
        WHERE id = $1
        RETURNING
-            id, name, code, location, location_id,
-            condition, status, photo_url, created_at,
-            funding_source_id, value, purchase_date, receipt_url, category_id`,
+         id, name, code, location, location_id,
+         condition, status, photo_url, created_at,
+         funding_source_id, value, purchase_date, receipt_url, category_id`,
       [assetId]
     );
 
-    // bisa kirim sekaligus loan + aset kalau mau
     res.json({
       asset: updatedAssetResult.rows[0],
       loan,
@@ -227,13 +259,17 @@ router.post("/:id/borrow", async (req, res) => {
 });
 
 
+
+
 // POST /api/assets/:id/return
 router.post("/:id/return", async (req, res) => {
   const assetId = req.params.id;
+  const { condition_after, update_asset_location } = req.body || {};
 
   try {
     const loanResult = await pool.query(
-      `SELECT * FROM loans
+      `SELECT *
+       FROM loans
        WHERE asset_id = $1 AND status = 'borrowed'
        ORDER BY borrowed_at DESC
        LIMIT 1`,
@@ -248,31 +284,48 @@ router.post("/:id/return", async (req, res) => {
 
     const loan = loanResult.rows[0];
 
-    await pool.query(
+    // update loans: returned + condition_after
+    const updatedLoanRes = await pool.query(
       `UPDATE loans
        SET status = 'returned',
-           returned_at = NOW()
-       WHERE id = $1`,
-      [loan.id]
+           returned_at = NOW(),
+           condition_after = COALESCE($1, condition_after)
+       WHERE id = $2
+       RETURNING
+         id, asset_id, borrower, borrower_user_id, usage_location_id,
+         borrowed_at, due_date, returned_at, status, notes,
+         before_photo_url, after_photo_url, condition_before, condition_after`,
+      [condition_after || null, loan.id]
     );
+
+    const updatedLoan = updatedLoanRes.rows[0];
+
+    // update assets: available + optional location update
+    const newLocationId =
+      update_asset_location ? loan.usage_location_id : null;
 
     const updatedAssetResult = await pool.query(
       `UPDATE assets
-       SET status = 'available'
+       SET status = 'available',
+           location_id = COALESCE($2, location_id)
        WHERE id = $1
        RETURNING
-            id, name, code, location, location_id,
-            condition, status, photo_url, created_at,
-            funding_source_id, value, purchase_date, receipt_url, category_id`,
-      [assetId]
+         id, name, code, location, location_id,
+         condition, status, photo_url, created_at,
+         funding_source_id, value, purchase_date, receipt_url, category_id`,
+      [assetId, newLocationId]
     );
 
-    res.json(updatedAssetResult.rows[0]);
+    res.json({
+      asset: updatedAssetResult.rows[0],
+      loan: updatedLoan,
+    });
   } catch (err) {
     console.error("Error POST /api/assets/:id/return:", err);
     res.status(500).json({ message: "Gagal memproses pengembalian" });
   }
 });
+
 
 // POST /api/assets/:id/photo
 router.post("/:id/photo", upload.single("photo"), async (req, res) => {
@@ -339,5 +392,118 @@ router.post("/:id/receipt", upload.single("receipt"), async (req, res) => {
     res.status(500).json({ message: "Gagal menyimpan kwitansi aset" });
   }
 });
+
+// PUT /api/assets/:id  (EDIT aset)
+router.put("/:id", async (req, res) => {
+  const id = req.params.id;
+  const {
+    name,
+    location,
+    condition,
+    funding_source_id,
+    value,
+    location_id,
+    category_id,
+    budget_code_id,
+    notes,
+    purchase_date,
+    status,
+  } = req.body;
+
+  if (!name) return res.status(400).json({ message: "Nama aset wajib diisi" });
+
+  try {
+    const result = await pool.query(
+      `UPDATE assets
+       SET name = $1,
+           location = $2,
+           condition = $3,
+           status = COALESCE($4, status),
+           funding_source_id = $5,
+           value = $6,
+           location_id = $7,
+           category_id = $8,
+           budget_code_id = $9,
+           notes = $10,
+           purchase_date = $11
+       WHERE id = $12 AND deleted_at IS NULL
+       RETURNING
+         id, name, code, location, condition, status,
+         funding_source_id, value, location_id, category_id, budget_code_id,
+         notes, purchase_date, sequence_no, photo_url, receipt_url, created_at`,
+      [
+        name,
+        location || null,
+        condition || null,
+        status || null,
+        funding_source_id || null,
+        value || null,
+        location_id || null,
+        category_id || null,
+        budget_code_id || null,
+        notes || null,
+        purchase_date || null,
+        id,
+      ]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Aset tidak ditemukan" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("PUT /api/assets/:id error:", err);
+    res.status(500).json({ message: "Gagal mengubah aset" });
+  }
+});
+
+// DELETE /api/assets/:id  (SOFT DELETE)
+router.delete("/:id", async (req, res) => {
+  const id = req.params.id;
+  try {
+    const result = await pool.query(
+      `UPDATE assets
+       SET deleted_at = NOW()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id`,
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Aset tidak ditemukan / sudah terhapus" });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /api/assets/:id error:", err);
+    res.status(500).json({ message: "Gagal menghapus aset" });
+  }
+});
+
+// POST /api/assets/:id/restore
+router.post("/:id/restore", async (req, res) => {
+  const id = req.params.id;
+  try {
+    const result = await pool.query(
+      `UPDATE assets
+       SET deleted_at = NULL
+       WHERE id = $1 AND deleted_at IS NOT NULL
+       RETURNING id`,
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Aset tidak ditemukan / belum terhapus" });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("POST /api/assets/:id/restore error:", err);
+    res.status(500).json({ message: "Gagal restore aset" });
+  }
+});
+
+
 
 export default router;
