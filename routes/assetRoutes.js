@@ -161,100 +161,97 @@ router.post("/", async (req, res) => {
   }
 });
 
-// POST /api/assets/:id/borrow
+/* ============================================================
+   BORROW ASSET (PINJAM) - FIX DETAIL LOKASI & NOTES
+============================================================ */
 router.post("/:id/borrow", async (req, res) => {
   const assetId = req.params.id;
-
-  const {
-    borrower, // optional (legacy)
-    borrower_user_id,
-    usage_location_id,
-    due_date,
-    notes,
-    condition_now, // ✅ NEW
+  // Ambil data baru dari body (detail_location & notes)
+  const { 
+    borrower_user_id, 
+    usage_location_id, 
+    due_date, 
+    condition_now, 
+    detail_location, // <--- Data baru dari Frontend
+    notes            // <--- Data baru dari Frontend
   } = req.body;
 
-  // minimal: harus ada borrower_user_id (karena sekarang pilih dari list)
-  if (!borrower_user_id) {
-    return res.status(400).json({ message: "borrower_user_id wajib diisi" });
-  }
-
-  if (!usage_location_id) {
-    return res.status(400).json({ message: "usage_location_id wajib diisi" });
-  }
+  const client = await pool.connect();
 
   try {
-    // cek aset dulu
-    const assetResult = await pool.query("SELECT * FROM assets WHERE id = $1", [
-      assetId,
+    await client.query("BEGIN");
+
+    // 1. Ambil nama peminjam (untuk kolom text 'borrower' di tabel loans)
+    const userRes = await client.query("SELECT name FROM users WHERE id = $1", [
+      borrower_user_id,
     ]);
-    if (assetResult.rowCount === 0) {
-      return res.status(404).json({ message: "Aset tidak ditemukan" });
-    }
-    const asset = assetResult.rows[0];
-
-    if (asset.status === "borrowed") {
-      return res.status(400).json({ message: "Aset ini sedang dipinjam" });
-    }
-
-    // ambil user peminjam utk isi field borrower (string) agar kompatibel
-    const userRes = await pool.query(
-      `SELECT id, name, email FROM users WHERE id = $1 AND deleted_at IS NULL`,
-      [borrower_user_id]
-    );
     if (userRes.rowCount === 0) {
-      return res.status(400).json({ message: "User peminjam tidak valid" });
+      throw new Error("User peminjam tidak ditemukan");
     }
-    const borrowerName = borrower || userRes.rows[0].name;
+    const borrowerName = userRes.rows[0].name;
 
-    // insert ke loans (isi field baru)
-    const loanRes = await pool.query(
+    // 2. Insert ke tabel LOANS
+    // Tambahkan kolom 'notes' ke dalam query insert
+    const loanRes = await client.query(
       `INSERT INTO loans (
-         asset_id,
-         borrower,
-         borrower_user_id,
-         usage_location_id,
-         due_date,
-         notes,
-         condition_before
+         asset_id, 
+         borrower_user_id, 
+         borrower, 
+         usage_location_id, 
+         due_date, 
+         condition_before, 
+         status, 
+         notes,           -- <--- Simpan catatan di sini
+         borrowed_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING
-         id, asset_id, borrower, borrower_user_id, usage_location_id,
-         borrowed_at, due_date, returned_at, status, notes,
-         before_photo_url, after_photo_url, condition_before, condition_after`,
+       VALUES ($1, $2, $3, $4, $5, $6, 'borrowed', $7, NOW())
+       RETURNING id`,
       [
         assetId,
-        borrowerName,
         borrower_user_id,
+        borrowerName,
         usage_location_id,
-        due_date || null,
-        notes || null,
-        condition_now || null, // ✅ masuk ke condition_before
+        due_date,
+        condition_now || "baik",
+        notes || ""       // <--- Masukkan nilai notes
+      ]
+    );
+    
+    const newLoanId = loanRes.rows[0].id;
+
+    // 3. Update tabel ASSETS
+    // Update location_id (Utama) DAN location (Detail)
+    const updateAssetRes = await client.query(
+      `UPDATE assets
+       SET status = 'borrowed',
+           location_id = $1,      -- Update Lokasi Utama (ID)
+           location = $2,         -- Update Detail Lokasi (Text) <--- INI YG DITAMBAH
+           condition = $3         -- Update Kondisi Terkini
+       WHERE id = $4
+       RETURNING *`,
+      [
+        usage_location_id, 
+        detail_location || "", // Masukkan detail lokasi baru
+        condition_now || "baik", 
+        assetId
       ]
     );
 
-    const loan = loanRes.rows[0];
+    await client.query("COMMIT");
 
-    // update status aset + (opsional) update lokasi penggunaan ke location_id / location (kalau memang mau)
-    const updatedAssetResult = await pool.query(
-      `UPDATE assets
-       SET status = 'borrowed'
-       WHERE id = $1
-       RETURNING
-         id, name, code, location, location_id,
-         condition, status, photo_url, created_at,
-         funding_source_id, value, purchase_date, receipt_url, category_id`,
-      [assetId]
-    );
-
+    // 4. Kirim response data terbaru agar Frontend langsung berubah
     res.json({
-      asset: updatedAssetResult.rows[0],
-      loan,
+      message: "Peminjaman berhasil dicatat",
+      loan: { id: newLoanId },
+      asset: updateAssetRes.rows[0], // Aset dengan lokasi baru
     });
+
   } catch (err) {
-    console.error("Error POST /api/assets/:id/borrow:", err);
-    res.status(500).json({ message: "Gagal memproses peminjaman" });
+    await client.query("ROLLBACK");
+    console.error("Error borrow asset:", err);
+    res.status(500).json({ message: err.message || "Gagal memproses peminjaman" });
+  } finally {
+    client.release();
   }
 });
 
