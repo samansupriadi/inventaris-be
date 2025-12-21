@@ -60,7 +60,7 @@ router.get("/", async (req, res) => {
          loans.returned_at,
          loans.status,
          loans.notes,
-
+         loans.notes_return,
          loans.before_photo_url,
          loans.after_photo_url,
          loans.condition_before,

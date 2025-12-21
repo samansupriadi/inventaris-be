@@ -259,67 +259,100 @@ router.post("/:id/borrow", async (req, res) => {
 
 
 // POST /api/assets/:id/return
+/* ============================================================
+   RETURN ASSET (PENGEMBALIAN)
+============================================================ */
 router.post("/:id/return", async (req, res) => {
   const assetId = req.params.id;
-  const { condition_after, update_asset_location } = req.body || {};
+  const { 
+    condition_after, 
+    return_location_id, 
+    return_detail_location, 
+    notes_return,          // <--- Kita pakai ini langsung
+    update_asset_location 
+  } = req.body;
+
+  const client = await pool.connect();
 
   try {
-    const loanResult = await pool.query(
-      `SELECT *
-       FROM loans
-       WHERE asset_id = $1 AND status = 'borrowed'
-       ORDER BY borrowed_at DESC
-       LIMIT 1`,
+    await client.query("BEGIN");
+
+    // 1. Cek Data Pinjaman Aktif
+    const loanCheck = await client.query(
+      `SELECT id FROM loans 
+       WHERE asset_id = $1 AND status = 'borrowed' 
+       ORDER BY borrowed_at DESC LIMIT 1`,
       [assetId]
     );
 
-    if (loanResult.rowCount === 0) {
-      return res
-        .status(404)
-        .json({ message: "Tidak ada peminjaman aktif untuk aset ini" });
+    if (loanCheck.rowCount === 0) {
+      throw new Error("Aset ini tidak sedang dipinjam");
     }
 
-    const loan = loanResult.rows[0];
+    const loanId = loanCheck.rows[0].id;
 
-    // update loans: returned + condition_after
-    const updatedLoanRes = await pool.query(
+    // --- PERUBAHAN DI SINI ---
+    // Tidak perlu lagi menggabungkan string (concatenation).
+    // Kita update kolom 'notes_return' secara terpisah.
+
+    // 2. Update tabel LOANS
+    await client.query(
       `UPDATE loans
-       SET status = 'returned',
-           returned_at = NOW(),
-           condition_after = COALESCE($1, condition_after)
-       WHERE id = $2
-       RETURNING
-         id, asset_id, borrower, borrower_user_id, usage_location_id,
-         borrowed_at, due_date, returned_at, status, notes,
-         before_photo_url, after_photo_url, condition_before, condition_after`,
-      [condition_after || null, loan.id]
+       SET returned_at = NOW(),
+           status = 'returned',
+           condition_after = $1,
+           notes_return = $2    -- Simpan ke kolom baru
+       WHERE id = $3`,
+      [
+        condition_after, 
+        notes_return || "",     // Isi dengan catatan pengembalian
+        loanId
+      ]
     );
 
-    const updatedLoan = updatedLoanRes.rows[0];
+    // 3. Update tabel ASSETS (Logic Lokasi Tetap Sama)
+    const shouldUpdateLoc = String(update_asset_location) === "true" || update_asset_location === true;
+    let updateAssetQuery;
+    let updateAssetParams;
 
-    // update assets: available + optional location update
-    const newLocationId =
-      update_asset_location ? loan.usage_location_id : null;
+    if (shouldUpdateLoc && return_location_id) {
+       updateAssetQuery = `
+         UPDATE assets
+         SET status = 'available',
+             condition = $1,
+             location_id = $2,
+             location = $3
+         WHERE id = $4
+         RETURNING *
+       `;
+       updateAssetParams = [condition_after, return_location_id, return_detail_location || "", assetId];
+    } else {
+       updateAssetQuery = `
+         UPDATE assets
+         SET status = 'available',
+             condition = $1
+         WHERE id = $2
+         RETURNING *
+       `;
+       updateAssetParams = [condition_after, assetId];
+    }
 
-    const updatedAssetResult = await pool.query(
-      `UPDATE assets
-       SET status = 'available',
-           location_id = COALESCE($2, location_id)
-       WHERE id = $1
-       RETURNING
-         id, name, code, location, location_id,
-         condition, status, photo_url, created_at,
-         funding_source_id, value, purchase_date, receipt_url, category_id`,
-      [assetId, newLocationId]
-    );
+    const updateAssetRes = await client.query(updateAssetQuery, updateAssetParams);
+
+    await client.query("COMMIT");
 
     res.json({
-      asset: updatedAssetResult.rows[0],
-      loan: updatedLoan,
+      message: "Aset berhasil dikembalikan",
+      loan: { id: loanId },
+      asset: updateAssetRes.rows[0],
     });
+
   } catch (err) {
-    console.error("Error POST /api/assets/:id/return:", err);
-    res.status(500).json({ message: "Gagal memproses pengembalian" });
+    await client.query("ROLLBACK");
+    console.error("Error return asset:", err);
+    res.status(500).json({ message: err.message });
+  } finally {
+    client.release();
   }
 });
 
