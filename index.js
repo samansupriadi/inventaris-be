@@ -2,7 +2,12 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import helmet from "helmet";
+import cookieParser from "cookie-parser";
 import { uploadsDir } from "./upload.js";
+
+// --- IMPORT LIMITER DARI FILE BARU ---
+import { globalLimiter } from "./middleware/limiter.js";
 
 // routers
 import healthRouter from "./routes/healthRoutes.js";
@@ -18,18 +23,36 @@ import authRouter from "./routes/authRoutes.js";
 import entityRouter from "./routes/entityRoutes.js";
 import permissionRouter from "./routes/permissionRoutes.js";
 
-
-
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 4000;
 
-app.use(cors());
+// 1. SECURITY HEADERS
+app.use(helmet());
+
+// 2. CORS CONFIG
+app.use(cors({
+  origin: "http://localhost:5173", 
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+// 3. PARSE COOKIES & JSON
+app.use(cookieParser());
 app.use(express.json());
 
+// 4. GLOBAL RATE LIMITER
+// (Definisi manual dihapus, langsung pakai yang di-import)
+app.use(globalLimiter);
+
 // static uploads
-app.use("/uploads", express.static(uploadsDir));
+app.use("/uploads", express.static(uploadsDir, {
+  setHeaders: (res) => {
+    res.set("Cross-Origin-Resource-Policy", "cross-origin");
+  }
+}));
 
 // routes
 app.use("/api/health", healthRouter);
