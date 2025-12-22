@@ -23,6 +23,7 @@ import authRouter from "./routes/authRoutes.js";
 import entityRouter from "./routes/entityRoutes.js";
 import permissionRouter from "./routes/permissionRoutes.js";
 import importRoutes from "./routes/importRoutes.js";
+import opnameRoutes from "./routes/opnameRoutes.js";
 
 dotenv.config();
 
@@ -55,7 +56,7 @@ app.use("/uploads", express.static(uploadsDir, {
   }
 }));
 
-app.use("/api/import", importRoutes);
+
 
 // routes
 app.use("/api/health", healthRouter);
@@ -70,6 +71,8 @@ app.use("/api/budget-codes", budgetCodeRouter);
 app.use("/api", authRouter);       
 app.use("/api/entities", entityRouter);
 app.use("/api/permissions", permissionRouter);
+app.use("/api/import", importRoutes);
+app.use("/api/opname", opnameRoutes);
 
 // listen
 app.listen(port, () => {
