@@ -22,6 +22,7 @@ import budgetCodeRouter from "./routes/budgetCodeRoutes.js";
 import authRouter from "./routes/authRoutes.js";
 import entityRouter from "./routes/entityRoutes.js";
 import permissionRouter from "./routes/permissionRoutes.js";
+import importRoutes from "./routes/importRoutes.js";
 
 dotenv.config();
 
@@ -53,6 +54,8 @@ app.use("/uploads", express.static(uploadsDir, {
     res.set("Cross-Origin-Resource-Policy", "cross-origin");
   }
 }));
+
+app.use("/api/import", importRoutes);
 
 // routes
 app.use("/api/health", healthRouter);
